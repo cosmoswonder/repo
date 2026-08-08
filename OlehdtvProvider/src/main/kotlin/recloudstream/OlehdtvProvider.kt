@@ -23,7 +23,7 @@ class OlehdtvProvider : MainAPI() {
     override val hasMainPage = true
 
     // Get your free key at https://www.themoviedb.org/settings/api → "API Key (v3 auth)"
-    private val tmdbApiKey = "REPLACE_WITH_YOUR_TMDB_API_KEY"
+    private val tmdbApiKey = "5622cafbfe8f8cfe358a29c53e19bba0"
     private val tmdbBase = "https://api.themoviedb.org/3"
     private val tmdbImgW500 = "https://image.tmdb.org/t/p/w500"
     private val tmdbImgOriginal = "https://image.tmdb.org/t/p/original"
@@ -36,10 +36,16 @@ class OlehdtvProvider : MainAPI() {
         try { json.readValue<T>(text) } catch (_: Exception) { null }
 
     override val mainPage = mainPageOf(
-        "$mainUrl/index.php/vod/show/id/1/page/" to "电影",
-        "$mainUrl/index.php/vod/show/id/2/page/" to "连续剧",
-        "$mainUrl/index.php/vod/show/id/3/page/" to "综艺",
-        "$mainUrl/index.php/vod/show/id/4/page/" to "动漫",
+        "$mainUrl/index.php/vod/show/id/1/page/"    to "电影",
+        "$mainUrl/index.php/vod/show/id/202/page/"  to "国产剧",
+        "$mainUrl/index.php/vod/show/id/201/page/"  to "欧美剧",
+        "$mainUrl/index.php/vod/show/id/203/page/"  to "港台剧",
+        "$mainUrl/index.php/vod/show/id/204/page/"  to "日韩剧",
+        "$mainUrl/index.php/vod/show/id/1207/page/" to "短剧",
+        "$mainUrl/index.php/vod/show/id/3/page/"    to "综艺",
+        "$mainUrl/index.php/vod/show/id/401/page/"  to "日本动漫",
+        "$mainUrl/index.php/vod/show/id/402/page/"  to "国产动漫",
+        "$mainUrl/index.php/vod/show/id/403/page/"  to "欧美动漫",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
