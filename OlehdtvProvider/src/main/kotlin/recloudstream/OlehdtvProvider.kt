@@ -35,11 +35,14 @@ class OlehdtvProvider : MainAPI() {
     private inline fun <reified T : Any> parse(text: String): T? =
         try { json.readValue<T>(text) } catch (_: Exception) { null }
 
-    // Auto-detected from device locale. Override the body to force a specific language.
-    // Chinese locale  → zh-CN (shows Chinese synopsis, episode titles, etc.)
-    // Any other locale → en-US
-    private fun getTmdbLang(): String =
-        if (java.util.Locale.getDefault().language == "zh") "zh-CN" else "en-US"
+    // Reads the user's choice saved by OlehdtvPlugin.openSettings (SharedPreferences).
+    // Falls back to device locale if not yet set: Chinese → zh-CN, anything else → en-US.
+    private fun getTmdbLang(): String {
+        val ctx = com.lagradost.api.getContext() as? android.content.Context
+        val saved = ctx?.getSharedPreferences(OlehdtvPlugin.PREFS, 0)
+            ?.getString(OlehdtvPlugin.LANG_KEY, null)
+        return saved ?: if (java.util.Locale.getDefault().language == "zh") "zh-CN" else "en-US"
+    }
 
     // Strip 第XX季 (e.g. 第三季, 第2季) and return (cleanTitle, seasonNumber?).
     // Chinese ordinals 一–二十 are mapped to integers; digits handled directly.

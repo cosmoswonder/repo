@@ -1,5 +1,5 @@
 // Use an integer for version numbers
-version = 2
+version = 3
 
 cloudstream {
     description = "欧乐影院 — Chinese movies, series, variety and anime"
@@ -12,4 +12,10 @@ cloudstream {
     iconUrl = "https://www.google.com/s2/favicons?domain=www.olehdtv.com&sz=%size%"
 
     isCrossPlatform = false
+}
+
+dependencies {
+    // Stub JAR containing Plugin.class (app-side class with openSettings).
+    // Not shipped in the .cs3 — the host Cloudstream APK provides it at runtime.
+    compileOnly(fileTree("libs") { include("*.jar") })
 }
