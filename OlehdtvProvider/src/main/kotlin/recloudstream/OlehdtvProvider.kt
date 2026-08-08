@@ -5,9 +5,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
-// olehdtv.com runs maccms v10. The public JSON API is disabled ("closed"),
-// so all data is scraped from HTML. Video URLs live in the player_aaaa JS object
-// on each play page; they may be plain URLs or Base64-encoded.
+// olehdtv.com uses a custom maccms theme with obfuscated numeric CSS class names
+// for styled elements. The structural selectors below were confirmed against live HTML.
 class OlehdtvProvider : MainAPI() {
     override var mainUrl = "https://www.olehdtv.com"
     override var name = "OlehdTV"
@@ -20,8 +19,6 @@ class OlehdtvProvider : MainAPI() {
     override var lang = "zh"
     override val hasMainPage = true
 
-    // maccms paginated listing pattern: /index.php/vod/show/id/{TYPE}/page/{N}.html
-    // Type IDs: 1=电影, 2=连续剧, 3=综艺, 4=动漫
     override val mainPage = mainPageOf(
         "$mainUrl/index.php/vod/show/id/1/page/" to "电影",
         "$mainUrl/index.php/vod/show/id/2/page/" to "连续剧",
@@ -31,20 +28,20 @@ class OlehdtvProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val doc = app.get("${request.data}${page}.html").document
-        val items = doc.select("ul.module-list li.module-item").mapNotNull { it.toSearchResponse() }
+        val items = doc.select("li.vodlist_item").mapNotNull { it.toSearchResponse() }
         return newHomePageResponse(
             listOf(HomePageList(request.name, items, isHorizontalImages = false)),
             hasNext = items.isNotEmpty(),
         )
     }
 
+    // Works for both listing cards (li.vodlist_item) and search results (li.searchlist_item)
+    // Both contain a.vodlist_thumb with title attr, href, and data-original for the poster.
     private fun Element.toSearchResponse(): SearchResponse? {
-        val href = selectFirst("a.module-item-link")?.attr("href")
-            ?.let { fixUrl(it) } ?: return null
-        val title = selectFirst(".module-item-title")?.text()?.trim()
-            .takeIf { !it.isNullOrBlank() } ?: return null
-        // Images are lazy-loaded; real URL is in data-src
-        val poster = selectFirst("img.lazyload")?.attr("data-src")
+        val anchor = selectFirst("a.vodlist_thumb") ?: return null
+        val href = fixUrl(anchor.attr("href"))
+        val title = anchor.attr("title").trim().takeIf { it.isNotBlank() } ?: return null
+        val poster = anchor.attr("data-original").takeIf { it.isNotBlank() }
         return newMovieSearchResponse(title, href, TvType.Movie) {
             posterUrl = poster
         }
@@ -55,59 +52,55 @@ class OlehdtvProvider : MainAPI() {
             "$mainUrl/index.php/vod/search.html",
             params = mapOf("wd" to query),
         ).document
-        return doc.select("ul.module-list li.module-item").mapNotNull { it.toSearchResponse() }
+        return doc.select("li.searchlist_item").mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val doc = app.get(url).document
 
-        val title = doc.selectFirst(".module-info-title")?.text()?.trim()
-            ?: doc.selectFirst("h1")?.text()?.trim()
-            ?: return null
+        // h2.title.scookie holds the title but has an inline <script> child — remove it first
+        val titleEl = doc.selectFirst("h2.title.scookie") ?: doc.selectFirst("h2.title")
+        titleEl?.select("script")?.remove()
+        val title = titleEl?.text()?.trim() ?: return null
 
-        val poster = doc.selectFirst(".module-info-pic img.lazyload")?.attr("data-src")
-            ?: doc.selectFirst(".module-info-pic img")?.attr("src")
+        val poster = doc.selectFirst(".content_thumb a.vodlist_thumb")
+            ?.attr("data-original")?.takeIf { it.isNotBlank() }
 
-        val desc = doc.selectFirst(".module-info-dese-content")?.text()
-            ?: doc.selectFirst(".module-info-dese")?.text()
+        val desc = doc.selectFirst(".content_desc.context span")?.text()
+            ?: doc.selectFirst(".content_desc span")?.text()
 
-        // Parse dt/dd meta pairs: 年份, 地区, 类型, 导演, 主演 …
-        var year: Int? = null
-        var genreRaw = ""
-        val dts = doc.select(".module-info-items dt")
-        val dds = doc.select(".module-info-items dd")
-        dts.forEachIndexed { i, dt ->
-            val value = dds.getOrNull(i)?.text()?.trim() ?: return@forEachIndexed
-            when {
-                dt.text().contains("年份") -> year = value.toIntOrNull()
-                dt.text().contains("类型") -> genreRaw = value
-            }
-        }
-        val tags = genreRaw.split(Regex("\\s+")).filter { it.isNotBlank() }
+        // Meta line: "2026 / 美国 / 未知"  — first vodlist_sub that contains "/"
+        val metaParts = doc.select("p.vodlist_sub")
+            .firstOrNull { it.text().contains("/") }
+            ?.text()?.split("/")?.map { it.trim() }
+        val year = metaParts?.getOrNull(0)?.toIntOrNull()
 
-        val episodeLinks = doc.select(".module-play-list a.module-play-list-link")
+        // Genre tag shown in search results and sometimes in detail (span.info_right)
+        val genre = doc.selectFirst("span.info_right")?.text()?.trim() ?: ""
+
+        // playlist_notfull is the visible (non-collapsed) episode list.
+        // Filter to /vod/play/ only — excludes /vod/play_vip/ premium links.
+        val episodeLinks = doc.select(".playlist_notfull ul.content_playlist li a")
+            .filter { it.attr("href").contains("/vod/play/") }
+
         if (episodeLinks.isEmpty()) return null
 
-        // Detect movie vs series: a single episode whose label isn't numbered ("第N集/话")
-        // is almost always a movie presented as a single play button.
-        val singleEp = episodeLinks.size == 1
-        val firstEp = episodeLinks.firstOrNull()
-        val epText = firstEp?.text()?.trim() ?: ""
-        val isMovie = singleEp && !epText.contains(Regex("第\\d+[集话]"))
+        // A single episode labelled "立即播放" (or anything without 第N集/话) is a movie
+        val firstEpText = episodeLinks.first().text().trim()
+        val isMovie = episodeLinks.size == 1 && !firstEpText.contains(Regex("第\\d+[集话]"))
 
         if (isMovie) {
-            val playUrl = fixUrl(firstEp?.attr("href") ?: return null)
+            val playUrl = fixUrl(episodeLinks.first().attr("href"))
             return newMovieLoadResponse(title, url, TvType.Movie, playUrl) {
                 posterUrl = poster
                 plot = desc
                 this.year = year
-                this.tags = tags
             }
         }
 
         val tvType = when {
-            genreRaw.contains("动漫") -> TvType.Anime
-            genreRaw.contains("综艺") -> TvType.Others
+            genre.contains("动漫") -> TvType.Anime
+            genre.contains("综艺") -> TvType.Others
             else -> TvType.TvSeries
         }
 
@@ -122,7 +115,6 @@ class OlehdtvProvider : MainAPI() {
             posterUrl = poster
             plot = desc
             this.year = year
-            this.tags = tags
         }
     }
 
@@ -134,18 +126,18 @@ class OlehdtvProvider : MainAPI() {
     ): Boolean {
         val doc = app.get(data, referer = mainUrl).document
 
-        // The play page embeds a player_aaaa JS object with the stream URL.
-        // Example: var player_aaaa = {"url":"https://…/video.m3u8","url_next":…}
+        // player_aaaa is a JS object on the play page containing the stream URL.
+        // Example: player_aaaa={"url":"https:\/\/cdn.example.com\/video.m3u8",...}
         val scriptData = doc.select("script").map { it.data() }
             .firstOrNull { it.contains("player_aaaa") } ?: return false
 
         var videoUrl = Regex(""""url"\s*:\s*"([^"]+)"""")
             .find(scriptData)?.groupValues?.get(1) ?: return false
 
-        // JSON strings often escape forward slashes as \/
+        // JSON escapes forward slashes as \/
         videoUrl = videoUrl.replace("\\/", "/")
 
-        // maccms sometimes Base64-encodes the URL to hide it from scrapers
+        // Some maccms instances Base64-encode the URL
         if (!videoUrl.startsWith("http")) {
             try {
                 videoUrl = Base64.decode(videoUrl, Base64.DEFAULT).toString(Charsets.UTF_8)
