@@ -35,6 +35,30 @@ class OlehdtvProvider : MainAPI() {
     private inline fun <reified T : Any> parse(text: String): T? =
         try { json.readValue<T>(text) } catch (_: Exception) { null }
 
+    // Auto-detected from device locale. Override the body to force a specific language.
+    // Chinese locale  → zh-CN (shows Chinese synopsis, episode titles, etc.)
+    // Any other locale → en-US
+    private fun getTmdbLang(): String =
+        if (java.util.Locale.getDefault().language == "zh") "zh-CN" else "en-US"
+
+    // Strip 第XX季 (e.g. 第三季, 第2季) and return (cleanTitle, seasonNumber?).
+    // Chinese ordinals 一–二十 are mapped to integers; digits handled directly.
+    private val chineseOrdinals = mapOf(
+        "一" to 1, "二" to 2, "三" to 3, "四" to 4, "五" to 5,
+        "六" to 6, "七" to 7, "八" to 8, "九" to 9, "十" to 10,
+        "十一" to 11, "十二" to 12, "十三" to 13, "十四" to 14, "十五" to 15,
+        "十六" to 16, "十七" to 17, "十八" to 18, "十九" to 19, "二十" to 20,
+    )
+    private val seasonRegex = Regex("""第([一二三四五六七八九十]+|\d+)季""")
+
+    private fun extractSeason(title: String): Pair<String, Int?> {
+        val match = seasonRegex.find(title) ?: return title to null
+        val raw = match.groupValues[1]
+        val num = raw.toIntOrNull() ?: chineseOrdinals[raw]
+        val clean = title.replace(match.value, "").trim()
+        return clean to num
+    }
+
     override val mainPage = mainPageOf(
         "$mainUrl/index.php/vod/show/id/1/page/"    to "电影",
         "$mainUrl/index.php/vod/show/id/202/page/"  to "国产剧",
@@ -83,6 +107,7 @@ class OlehdtvProvider : MainAPI() {
     private data class TmdbSearchItem(val id: Int = 0)
 
     private data class TmdbDetails(
+        val id: Int = 0,
         val overview: String? = null,
         val poster_path: String? = null,
         val backdrop_path: String? = null,
@@ -108,10 +133,23 @@ class OlehdtvProvider : MainAPI() {
 
     private data class TmdbCrew(val name: String = "", val job: String? = null)
 
-    // Searches TMDB by title, trying the primary content type first then the opposite
-    // (some films are listed as TV specials on TMDB and vice versa).
+    private data class TmdbSeasonResponse(
+        val episodes: List<TmdbEpisodeDetail> = emptyList()
+    )
+
+    private data class TmdbEpisodeDetail(
+        val episode_number: Int = 0,
+        val name: String? = null,
+        val overview: String? = null,
+        val still_path: String? = null,
+        val air_date: String? = null,
+    )
+
+    private data class TmdbFindResult(val details: TmdbDetails, val isTv: Boolean)
+
+    // Searches TMDB by title, trying the primary content type first then the opposite.
     // Returns null silently if the API key is not configured or no match is found.
-    private suspend fun fetchTmdb(title: String, isMovie: Boolean): TmdbDetails? {
+    private suspend fun fetchTmdb(title: String, isMovie: Boolean, lang: String): TmdbFindResult? {
         if (tmdbApiKey == "REPLACE_WITH_YOUR_TMDB_API_KEY") return null
 
         val types = if (isMovie) listOf("movie", "tv") else listOf("tv", "movie")
@@ -122,23 +160,38 @@ class OlehdtvProvider : MainAPI() {
                     params = mapOf(
                         "api_key" to tmdbApiKey,
                         "query" to title,
-                        "language" to "en-US",
+                        "language" to lang,
                     ),
                 ).text,
             )?.results?.firstOrNull()?.id ?: continue
 
-            return parse<TmdbDetails>(
+            val details = parse<TmdbDetails>(
                 app.get(
                     "$tmdbBase/$type/$firstId",
                     params = mapOf(
                         "api_key" to tmdbApiKey,
-                        "language" to "en-US",
+                        "language" to lang,
                         "append_to_response" to "credits",
                     ),
                 ).text,
             ) ?: continue
+            return TmdbFindResult(details, isTv = type == "tv")
         }
         return null
+    }
+
+    // Fetches per-episode metadata for one season. Returns a map of episode_number → detail.
+    private suspend fun fetchTmdbSeason(
+        tvId: Int,
+        season: Int,
+        lang: String,
+    ): Map<Int, TmdbEpisodeDetail> {
+        return parse<TmdbSeasonResponse>(
+            app.get(
+                "$tmdbBase/tv/$tvId/season/$season",
+                params = mapOf("api_key" to tmdbApiKey, "language" to lang),
+            ).text,
+        )?.episodes?.associateBy { it.episode_number } ?: emptyMap()
     }
 
     // ── Load ──────────────────────────────────────────────────────────────────
@@ -172,8 +225,11 @@ class OlehdtvProvider : MainAPI() {
         val firstEpText = episodeLinks.first().text().trim()
         val isMovie = episodeLinks.size == 1 && !firstEpText.contains(Regex("第\\d+[集话]"))
 
-        // Enrich with TMDB metadata; falls back to site data gracefully if unavailable
-        val tmdb = fetchTmdb(title, isMovie)
+        // Strip 第XX季 before searching TMDB (e.g. "末日地堡 第三季" → "末日地堡", season 3)
+        val (cleanTitle, detectedSeason) = extractSeason(title)
+        val lang = getTmdbLang()
+        val tmdbResult = fetchTmdb(cleanTitle, isMovie, lang)
+        val tmdb = tmdbResult?.details
 
         val mergedPlot = tmdb?.overview?.takeIf { it.isNotBlank() } ?: siteDesc
         val mergedPoster = tmdb?.poster_path?.let { "$tmdbImgW500$it" } ?: sitePoster
@@ -209,10 +265,26 @@ class OlehdtvProvider : MainAPI() {
             else -> TvType.TvSeries
         }
 
+        // Fetch per-episode synopsis/poster from TMDB when we have a TV series match
+        val tvSeason = detectedSeason ?: 1
+        val tmdbEpisodeMap: Map<Int, TmdbEpisodeDetail> =
+            if (tmdbResult != null && tmdbResult.isTv && tmdb != null && tmdb.id != 0) {
+                fetchTmdbSeason(tmdb.id, tvSeason, lang)
+            } else emptyMap()
+
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
         val episodes = episodeLinks.mapIndexed { index, ep ->
+            val epNum = index + 1
+            val tmdbEp = tmdbEpisodeMap[epNum]
             newEpisode(fixUrl(ep.attr("href"))) {
-                name = ep.text().trim()
-                episode = index + 1
+                name = tmdbEp?.name?.takeIf { it.isNotBlank() } ?: ep.text().trim()
+                episode = epNum
+                season = detectedSeason
+                description = tmdbEp?.overview?.takeIf { it.isNotBlank() }
+                posterUrl = tmdbEp?.still_path?.let { "$tmdbImgW500$it" }
+                date = tmdbEp?.air_date?.let {
+                    runCatching { sdf.parse(it)?.time }.getOrNull()
+                }
             }
         }
 
