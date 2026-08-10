@@ -401,9 +401,11 @@ class VideoProvider : MainAPI() {
 
     // ── dramacool (secondary source) ────────────────────────────────────────────
 
-    // Normalises a title for loose matching: drop a trailing "(year)", lowercase, keep alphanumerics.
+    // Normalises a title for loose matching: drop a trailing "(year)", lowercase, and keep only
+    // letters/digits. \p{L}/\p{N} are used (not a-z0-9) so CJK titles survive instead of becoming
+    // an empty string — otherwise a Chinese query would spuriously "contain"-match anything.
     private fun normTitle(s: String): String =
-        s.replace(Regex("""\(\d{4}\)"""), "").lowercase().replace(Regex("[^a-z0-9]"), "")
+        s.replace(Regex("""\(\d{4}\)"""), "").lowercase().replace(Regex("""[^\p{L}\p{N}]"""), "")
 
     private fun fixDcUrl(href: String): String? = when {
         href.isBlank() -> null
@@ -426,17 +428,24 @@ class VideoProvider : MainAPI() {
         val ep = episode ?: 1
         for (rawTitle in titles) {
             val query = rawTitle.trim()
-            if (query.isBlank()) continue
+            val qn = normTitle(query)
+            // Need at least a couple of characters to match meaningfully.
+            if (qn.length < 2) continue
 
-            val results = try {
+            val searchDoc = try {
                 app.get("$dramacoolBase/search", params = mapOf("keyword" to query)).document
-                    .select("ul.list-episode-item li a.img")
             } catch (_: Exception) {
                 continue
             }
+
+            // dramacool shows a "No dramas found." notice plus a generic suggestion list when
+            // the query doesn't match (e.g. a Chinese title it doesn't index) — never treat those
+            // fallback suggestions as real results.
+            if (searchDoc.selectFirst("p.no-items") != null) continue
+
+            val results = searchDoc.select("ul.list-episode-item li a.img")
             if (results.isEmpty()) continue
 
-            val qn = normTitle(query)
             val match = results.firstOrNull { a ->
                 val t = normTitle(a.attr("title"))
                 t.isNotBlank() && (t == qn || t.contains(qn) || qn.contains(t))
