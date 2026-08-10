@@ -28,6 +28,10 @@ class VideoProvider : MainAPI() {
     private val tmdbImgW500 = "https://image.tmdb.org/t/p/w500"
     private val tmdbImgOriginal = "https://image.tmdb.org/t/p/original"
 
+    // Secondary source: dramacool (English/romanised titles work best — the TMDB title is tried
+    // first, then the site title). Matched by title + episode number.
+    private val dramacoolBase = "https://dramacool.co.at"
+
     private val json = jacksonObjectMapper().apply {
         configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
@@ -112,6 +116,8 @@ class VideoProvider : MainAPI() {
 
     private data class TmdbDetails(
         val id: Int = 0,
+        val name: String? = null,              // TV shows (localised title)
+        val title: String? = null,             // movies (localised title)
         val overview: String? = null,
         val poster_path: String? = null,
         val backdrop_path: String? = null,
@@ -250,9 +256,14 @@ class VideoProvider : MainAPI() {
             )
         }
 
+        // Title used to look up the dramacool secondary source. Prefer the TMDB title (often the
+        // English/romanised name dramacool uses), fall back to the cleaned site title.
+        val dramacoolTitle = (tmdb?.name ?: tmdb?.title)?.takeIf { it.isNotBlank() }
+
         if (isMovie) {
             val playUrl = fixUrl(episodeLinks.first().attr("href"))
-            return newMovieLoadResponse(title, url, TvType.Movie, playUrl) {
+            val movieData = encodePlay(playUrl, dramacoolTitle, cleanTitle, 1)
+            return newMovieLoadResponse(title, url, TvType.Movie, movieData) {
                 posterUrl = mergedPoster
                 backgroundPosterUrl = mergedBackdrop
                 plot = mergedPlot
@@ -280,16 +291,23 @@ class VideoProvider : MainAPI() {
         val episodes = episodeLinks.mapIndexed { index, ep ->
             val epNum = index + 1
             val tmdbEp = tmdbEpisodeMap[epNum]
-            newEpisode(fixUrl(ep.attr("href"))) {
-                name = tmdbEp?.name?.takeIf { it.isNotBlank() } ?: ep.text().trim()
-                episode = epNum
-                season = detectedSeason
-                description = tmdbEp?.overview?.takeIf { it.isNotBlank() }
-                posterUrl = tmdbEp?.still_path?.let { "$tmdbImgW500$it" }
-                date = tmdbEp?.air_date?.let {
-                    runCatching { sdf.parse(it)?.time }.getOrNull()
-                }
-            }
+            val epData = encodePlay(fixUrl(ep.attr("href")), dramacoolTitle, cleanTitle, epNum)
+            // fix = false: the data is a JSON blob, not a URL, so it must not be run through fixUrl.
+            // initializer passed by name so the trailing-lambda + named-arg combo stays unambiguous.
+            newEpisode(
+                epData,
+                initializer = {
+                    name = tmdbEp?.name?.takeIf { it.isNotBlank() } ?: ep.text().trim()
+                    episode = epNum
+                    season = detectedSeason
+                    description = tmdbEp?.overview?.takeIf { it.isNotBlank() }
+                    posterUrl = tmdbEp?.still_path?.let { "$tmdbImgW500$it" }
+                    date = tmdbEp?.air_date?.let {
+                        runCatching { sdf.parse(it)?.time }.getOrNull()
+                    }
+                },
+                fix = false,
+            )
         }
 
         return newTvSeriesLoadResponse(title, url, tvType, episodes) {
@@ -305,13 +323,52 @@ class VideoProvider : MainAPI() {
 
     // ── Play ──────────────────────────────────────────────────────────────────
 
+    // Carries everything loadLinks needs: the olehdtv play page plus the title/episode used to
+    // look up the dramacool secondary source.
+    private data class PlayData(
+        val u: String,           // olehdtv play-page url
+        val t: String? = null,   // dramacool search title (TMDB name, if any)
+        val o: String? = null,   // fallback search title (cleaned site title)
+        val e: Int? = null,      // episode number
+    )
+
+    private fun encodePlay(url: String, title: String?, orig: String?, episode: Int?): String =
+        json.writeValueAsString(PlayData(url, title, orig, episode))
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val doc = app.get(data, referer = mainUrl).document
+        // data is a PlayData JSON blob; fall back to treating it as a plain olehdtv url.
+        val play = parse<PlayData>(data)
+        val olehdtvUrl = play?.u ?: data
+
+        var found = extractOlehdtv(olehdtvUrl, callback)
+
+        // Secondary source (best effort): dramacool, matched by title + episode number.
+        val titles = listOfNotNull(play?.t, play?.o).distinct()
+        if (titles.isNotEmpty()) {
+            try {
+                found = addDramacoolLinks(titles, play?.e, subtitleCallback, callback) || found
+            } catch (_: Exception) {
+                // never let the secondary source break the primary one
+            }
+        }
+        return found
+    }
+
+    /** Extracts the native olehdtv source from a play page (player_aaaa JS object). */
+    private suspend fun extractOlehdtv(
+        playUrl: String,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val doc = try {
+            app.get(playUrl, referer = mainUrl).document
+        } catch (_: Exception) {
+            return false
+        }
 
         // player_aaaa is a JS object on the play page: player_aaaa={"url":"…","url_next":"…",…}
         val scriptData = doc.select("script").map { it.data() }
@@ -340,5 +397,81 @@ class VideoProvider : MainAPI() {
             referer = mainUrl
         })
         return true
+    }
+
+    // ── dramacool (secondary source) ────────────────────────────────────────────
+
+    // Normalises a title for loose matching: drop a trailing "(year)", lowercase, keep alphanumerics.
+    private fun normTitle(s: String): String =
+        s.replace(Regex("""\(\d{4}\)"""), "").lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    private fun fixDcUrl(href: String): String? = when {
+        href.isBlank() -> null
+        href.startsWith("http") -> href
+        href.startsWith("//") -> "https:$href"
+        href.startsWith("/") -> "$dramacoolBase$href"
+        else -> "$dramacoolBase/$href"
+    }
+
+    /**
+     * Searches dramacool for [titles] (first match wins), locates the given [episode], and hands
+     * each embedded server to Cloudstream's extractor registry. Returns true if any server matched.
+     */
+    private suspend fun addDramacoolLinks(
+        titles: List<String>,
+        episode: Int?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
+        val ep = episode ?: 1
+        for (rawTitle in titles) {
+            val query = rawTitle.trim()
+            if (query.isBlank()) continue
+
+            val results = try {
+                app.get("$dramacoolBase/search", params = mapOf("keyword" to query)).document
+                    .select("ul.list-episode-item li a.img")
+            } catch (_: Exception) {
+                continue
+            }
+            if (results.isEmpty()) continue
+
+            val qn = normTitle(query)
+            val match = results.firstOrNull { a ->
+                val t = normTitle(a.attr("title"))
+                t.isNotBlank() && (t == qn || t.contains(qn) || qn.contains(t))
+            } ?: continue
+
+            val detailUrl = fixDcUrl(match.attr("href")) ?: continue
+            val detailDoc = try { app.get(detailUrl).document } catch (_: Exception) { continue }
+
+            // Find the "Episode N" anchor (0-padded ok, but not 10/11/… for N=1); fall back to first.
+            val epRegex = Regex("""(?i)episode\s+0*$ep(\D|$)""")
+            val epAnchor = detailDoc.select("ul.all-episode li a.img").firstOrNull { a ->
+                epRegex.containsMatchIn(a.selectFirst("h3.title")?.text() ?: a.attr("alt"))
+            } ?: detailDoc.selectFirst("ul.all-episode li a.img") ?: continue
+
+            val epUrl = fixDcUrl(epAnchor.attr("href")) ?: continue
+            val epDoc = try { app.get(epUrl).document } catch (_: Exception) { continue }
+
+            // Collect all embed servers: data-video attributes plus the default iframe.
+            val servers = LinkedHashSet<String>()
+            epDoc.select("[data-video]").forEach { el ->
+                fixDcUrl(el.attr("data-video"))?.let { servers.add(it) }
+            }
+            epDoc.selectFirst(".watch-iframe iframe, iframe[src*=\"//\"]")?.attr("src")
+                ?.let { fixDcUrl(it) }?.let { servers.add(it) }
+
+            var any = false
+            for (server in servers) {
+                any = try {
+                    loadExtractor(server, epUrl, subtitleCallback, callback) || any
+                } catch (_: Exception) {
+                    any
+                }
+            }
+            if (any) return true
+        }
+        return false
     }
 }
