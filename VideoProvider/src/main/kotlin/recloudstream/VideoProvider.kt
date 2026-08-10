@@ -120,6 +120,15 @@ class VideoProvider : MainAPI() {
         val vote_average: Double? = null,
         val genres: List<TmdbGenre>? = null,
         val credits: TmdbCredits? = null,
+        val images: TmdbImages? = null,
+    )
+
+    private data class TmdbImages(val logos: List<TmdbImage> = emptyList())
+
+    private data class TmdbImage(
+        val file_path: String? = null,
+        val iso_639_1: String? = null,   // language of the logo ("en", "zh", null = textless)
+        val vote_average: Double = 0.0,
     )
 
     private data class TmdbGenre(val name: String = "")
@@ -169,13 +178,17 @@ class VideoProvider : MainAPI() {
                 ).text,
             )?.results?.firstOrNull()?.id ?: continue
 
+            // include_image_language pulls logos in the display language, English, and the
+            // language-neutral (textless) set — TMDB otherwise only returns the display language.
+            val langPrefix = lang.substringBefore("-")
             val details = parse<TmdbDetails>(
                 app.get(
                     "$tmdbBase/$type/$firstId",
                     params = mapOf(
                         "api_key" to tmdbApiKey,
                         "language" to lang,
-                        "append_to_response" to "credits",
+                        "append_to_response" to "credits,images",
+                        "include_image_language" to "$langPrefix,en,null",
                     ),
                 ).text,
             ) ?: continue
@@ -249,12 +262,22 @@ class VideoProvider : MainAPI() {
                 roleString = cast.character,
             )
         }
+        // Transparent title logo (PNG). Prefer the display language, then English, then any /
+        // textless one, picking the highest-voted in each case.
+        val langPrefix = lang.substringBefore("-")
+        val logos = tmdb?.images?.logos?.filter { !it.file_path.isNullOrBlank() }.orEmpty()
+        val mergedLogo = (
+            logos.filter { it.iso_639_1 == langPrefix }.maxByOrNull { it.vote_average }
+                ?: logos.filter { it.iso_639_1 == "en" }.maxByOrNull { it.vote_average }
+                ?: logos.maxByOrNull { it.vote_average }
+            )?.file_path?.let { "$tmdbImgOriginal$it" }
 
         if (isMovie) {
             val playUrl = fixUrl(episodeLinks.first().attr("href"))
             return newMovieLoadResponse(title, url, TvType.Movie, playUrl) {
                 posterUrl = mergedPoster
                 backgroundPosterUrl = mergedBackdrop
+                this.logoUrl = mergedLogo
                 plot = mergedPlot
                 this.year = mergedYear
                 this.score = Score.from(mergedScore, 10)
@@ -295,6 +318,7 @@ class VideoProvider : MainAPI() {
         return newTvSeriesLoadResponse(title, url, tvType, episodes) {
             posterUrl = mergedPoster
             backgroundPosterUrl = mergedBackdrop
+            this.logoUrl = mergedLogo
             plot = mergedPlot
             this.year = mergedYear
             this.score = Score.from(mergedScore, 10)
