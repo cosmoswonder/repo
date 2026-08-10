@@ -1,5 +1,5 @@
 // Use an integer for version numbers
-version = 6
+version = 7
 
 cloudstream {
     description = "欧乐影院 — Chinese movies, series, variety and anime"
