@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
-class OlehdtvPlugin : Plugin() {
+class VideoPlugin : Plugin() {
 
     companion object {
         const val PREFS = "olehdtv"
@@ -14,7 +14,7 @@ class OlehdtvPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        registerMainAPI(OlehdtvProvider())
+        registerMainAPI(VideoProvider())
 
         openSettings = { ctx ->
             val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

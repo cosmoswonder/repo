@@ -10,7 +10,7 @@ import org.jsoup.nodes.Element
 
 // olehdtv.com uses a custom maccms theme with obfuscated numeric CSS class names
 // for styled elements. The structural selectors below were confirmed against live HTML.
-class OlehdtvProvider : MainAPI() {
+class VideoProvider : MainAPI() {
     override var mainUrl = "https://www.olehdtv.com"
     override var name = "OlehdTV"
     override val supportedTypes = setOf(
@@ -35,12 +35,12 @@ class OlehdtvProvider : MainAPI() {
     private inline fun <reified T : Any> parse(text: String): T? =
         try { json.readValue<T>(text) } catch (_: Exception) { null }
 
-    // Reads the user's choice saved by OlehdtvPlugin.openSettings (SharedPreferences).
+    // Reads the user's choice saved by VideoPlugin.openSettings (SharedPreferences).
     // Falls back to device locale if not yet set: Chinese → zh-CN, anything else → en-US.
     private fun getTmdbLang(): String {
         val ctx = com.lagradost.api.getContext() as? android.content.Context
-        val saved = ctx?.getSharedPreferences(OlehdtvPlugin.PREFS, 0)
-            ?.getString(OlehdtvPlugin.LANG_KEY, null)
+        val saved = ctx?.getSharedPreferences(VideoPlugin.PREFS, 0)
+            ?.getString(VideoPlugin.LANG_KEY, null)
         return saved ?: if (java.util.Locale.getDefault().language == "zh") "zh-CN" else "en-US"
     }
 
@@ -67,7 +67,8 @@ class OlehdtvProvider : MainAPI() {
         "$mainUrl/index.php/vod/show/id/202/page/"  to "国产剧",
         "$mainUrl/index.php/vod/show/id/201/page/"  to "欧美剧",
         "$mainUrl/index.php/vod/show/id/203/page/"  to "港台剧",
-        "$mainUrl/index.php/vod/show/id/204/page/"  to "日韩剧",
+        "$mainUrl/index.php/vod/show/area/%E6%97%A5%E6%9C%AC/id/204/page/" to "日剧",
+        "$mainUrl/index.php/vod/show/area/%E9%9F%A9%E5%9B%BD/id/204/page/" to "韩剧",
         "$mainUrl/index.php/vod/show/id/1207/page/" to "短剧",
         "$mainUrl/index.php/vod/show/id/3/page/"    to "综艺",
         "$mainUrl/index.php/vod/show/id/401/page/"  to "日本动漫",
